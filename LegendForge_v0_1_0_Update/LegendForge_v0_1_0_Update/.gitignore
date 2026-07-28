@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+
+# Local application state
+config.json
+logs/*.log
+reports/*
+!reports/.gitkeep
+projects/*.json
+!projects/.gitkeep
+
+# Packaging
+build/
+dist/
+Windows_Release/
+*.spec
+
+# Editors and OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
