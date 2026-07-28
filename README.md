@@ -1,2 +1,2 @@
-# Marvel-Legendary-MPC-Builder
+# LegendForge
 
