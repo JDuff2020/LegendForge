@@ -17,7 +17,7 @@ def run() -> int:
 
     QCoreApplication.setOrganizationName("JDuff2020")
     QCoreApplication.setApplicationName("LegendForge")
-    QCoreApplication.setApplicationVersion("0.1.0")
+    QCoreApplication.setApplicationVersion("0.2.0")
 
     app = QApplication(sys.argv)
     app.setApplicationDisplayName("LegendForge")

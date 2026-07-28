@@ -23,15 +23,20 @@ from PySide6.QtWidgets import (
     QPushButton,
     QStatusBar,
     QToolBar,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
 
 from app.models.project import Project
 from app.services.settings_service import SettingsService
+from app.services.database_service import DatabaseService
+from app.services.artwork_index_service import ArtworkIndexService
 from app.services.validation_service import ValidationService
 from app.ui.about_dialog import AboutDialog
+from app.ui.artwork_browser import ArtworkBrowser
 from app.ui.settings_dialog import SettingsDialog
+from app.ui.pipeline_dashboard import PipelineDashboard
 
 log = logging.getLogger(__name__)
 
@@ -55,7 +60,7 @@ class ValidationWorker(QObject):
 class MainWindow(QMainWindow):
     APP_TITLE = "LegendForge"
     APP_SUBTITLE = "Marvel Legendary Project Manager"
-    APP_VERSION = "0.1.0"
+    APP_VERSION = "0.2.0-revised"
 
     def __init__(self, root: Path, settings: SettingsService):
         super().__init__()
@@ -64,6 +69,9 @@ class MainWindow(QMainWindow):
         self.project_path: Path | None = None
         self.thread: QThread | None = None
         self.worker: ValidationWorker | None = None
+
+        self.database = DatabaseService(root / "data" / "legendforge.sqlite3")
+        self.artwork_index = ArtworkIndexService(self.database)
 
         default_pricing = root / "resources" / "DeckPrices.xlsx"
         self.project = Project(pricing_workbook=str(default_pricing))
@@ -155,6 +163,9 @@ class MainWindow(QMainWindow):
         self.addToolBar(Qt.ToolBarArea.TopToolBarArea, toolbar)
 
     def _build_central_widget(self) -> None:
+        self.tabs = QTabWidget()
+        self.tabs.setDocumentMode(True)
+
         central = QWidget()
         layout = QVBoxLayout(central)
         layout.setContentsMargins(18, 16, 18, 16)
@@ -170,6 +181,7 @@ class MainWindow(QMainWindow):
         form = QGridLayout(project_box)
         self.name_edit = QLineEdit()
         self.artwork_edit = QLineEdit()
+        self.processed_artwork_edit = QLineEdit()
         self.inventory_edit = QLineEdit()
         self.pricing_edit = QLineEdit()
         self.output_edit = QLineEdit()
@@ -178,7 +190,8 @@ class MainWindow(QMainWindow):
 
         fields = [
             ("Project name", self.name_edit, None),
-            ("Artwork library", self.artwork_edit, lambda: self._browse_folder(self.artwork_edit)),
+            ("Original artwork", self.artwork_edit, lambda: self._browse_folder(self.artwork_edit)),
+            ("Processed artwork", self.processed_artwork_edit, lambda: self._browse_folder(self.processed_artwork_edit)),
             ("Inventory workbook", self.inventory_edit, lambda: self._browse_file(self.inventory_edit)),
             ("Pricing workbook", self.pricing_edit, lambda: self._browse_file(self.pricing_edit)),
             ("Output folder", self.output_edit, lambda: self._browse_folder(self.output_edit)),
@@ -223,7 +236,22 @@ class MainWindow(QMainWindow):
         summary_layout.addWidget(self.summary)
         layout.addWidget(summary_box, 1)
 
-        self.setCentralWidget(central)
+        self.tabs.addTab(central, "Project")
+
+        self.artwork_browser = ArtworkBrowser(
+            self.artwork_index,
+            lambda: self.artwork_edit.text(),
+            self,
+        )
+        self.artwork_browser.status_message.connect(self.statusBar().showMessage)
+        self.tabs.addTab(self.artwork_browser, "Original Artwork")
+        self.processed_browser.status_message.connect(self.statusBar().showMessage)
+        self.tabs.addTab(self.processed_browser, "Processed Artwork")
+        self.pipeline_dashboard = PipelineDashboard(self.artwork_index, self._get_ai_backend, self._set_ai_backend)
+        self.pipeline_dashboard.status_message.connect(self.statusBar().showMessage)
+        self.tabs.addTab(self.pipeline_dashboard, "Pipeline / AI")
+
+        self.setCentralWidget(self.tabs)
 
     def _build_docks(self) -> None:
         self.recent_dock = QDockWidget("Recent Projects", self)
@@ -241,7 +269,7 @@ class MainWindow(QMainWindow):
         self.session_notes.setReadOnly(True)
         self.session_notes.setPlainText(
             "LegendForge is ready.\n\n"
-            "This milestone provides the application shell and project-validation foundation."
+            "This milestone adds the SQLite database engine, incremental artwork indexing, fast search, and previews."
         )
         self.log_dock.setWidget(self.session_notes)
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.log_dock)
@@ -314,6 +342,7 @@ class MainWindow(QMainWindow):
         self.project = Project(
             project_name=self.name_edit.text().strip() or "Marvel Proxies",
             artwork_folder=self.artwork_edit.text().strip(),
+            processed_artwork_folder=self.processed_artwork_edit.text().strip(),
             inventory_workbook=self.inventory_edit.text().strip(),
             pricing_workbook=self.pricing_edit.text().strip(),
             output_folder=self.output_edit.text().strip(),
@@ -325,6 +354,7 @@ class MainWindow(QMainWindow):
         p = self.project
         self.name_edit.setText(p.project_name)
         self.artwork_edit.setText(p.artwork_folder)
+        self.processed_artwork_edit.setText(p.processed_artwork_folder)
         self.inventory_edit.setText(p.inventory_workbook)
         self.pricing_edit.setText(p.pricing_workbook)
         self.output_edit.setText(p.output_folder)
@@ -545,6 +575,15 @@ class MainWindow(QMainWindow):
         )
         if path:
             edit.setText(path)
+
+    def _get_ai_backend(self):
+        return self.project.ai_backend, self.project.ai_executable
+
+    def _set_ai_backend(self, backend: str, executable: str):
+        self._fields_to_project()
+        self.project.ai_backend = backend
+        self.project.ai_executable = executable
+        self.statusBar().showMessage("AI backend settings updated")
 
     def closeEvent(self, event: QCloseEvent) -> None:
         self._fields_to_project()

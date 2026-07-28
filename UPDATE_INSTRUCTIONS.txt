@@ -1,0 +1,27 @@
+LEGENDFORGE v0.2.0 REVISED — SOURCE / PIPELINE ARCHITECTURE
+===========================================================
+
+1. Close LegendForge.
+2. Copy everything in this update folder into your GitHub repository.
+3. Allow Windows to replace existing files.
+4. Copy the same update into D:\MPCB and replace files.
+5. Run RUN_BUILDER.bat.
+
+FIRST USE
+---------
+1. Set Original artwork to D:\Artwork.
+2. Set Processed artwork to D:\Artwork_Processed.
+3. Open Original Artwork and click Index Originals.
+4. Open Processed Artwork and click Index Processed.
+5. Open Pipeline / AI and click Refresh Pipeline Status.
+6. Configure an external AI backend only when you have a supported model executable.
+
+IMPORTANT
+---------
+Original artwork is now the source of truth. Processed artwork is treated as derived output.
+AI model files are not bundled. This revision provides backend configuration and pipeline-state tracking;
+batch execution of external AI models is reserved for the next pipeline milestone.
+
+GIT COMMIT SUMMARY
+------------------
+Revise v0.2.0 for source-first artwork pipeline
