@@ -30,10 +30,16 @@ class IndexWorker(QObject):
     finished = Signal(object)
     failed = Signal(str)
 
-    def __init__(self, service: ArtworkIndexService, root: Path):
+    def __init__(
+    self,
+    service: ArtworkIndexService,
+    root: Path,
+    library_kind: str,
+):
         super().__init__()
         self.service = service
         self.root = root
+        self.library_kind = library_kind
 
     def run(self) -> None:
         try:
@@ -144,7 +150,11 @@ class ArtworkBrowser(QWidget):
         self.progress.setRange(0, 0)
         self.status_message.emit("Indexing artwork…")
         self.thread = QThread(self)
-        self.worker = IndexWorker(self.service, root)
+        self.worker = IndexWorker(
+    self.service,
+    root,
+    self.library_kind,
+)
         self.worker.moveToThread(self.thread)
         self.thread.started.connect(self.worker.run)
         self.worker.progress.connect(self._index_progress)

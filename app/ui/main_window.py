@@ -239,15 +239,28 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(central, "Project")
 
         self.artwork_browser = ArtworkBrowser(
-            self.artwork_index,
-            lambda: self.artwork_edit.text(),
-            self,
+            service=self.artwork_index,
+            artwork_root_getter=lambda: self.artwork_edit.text(),
+            library_kind="original",
+            parent=self,
         )
         self.artwork_browser.status_message.connect(self.statusBar().showMessage)
         self.tabs.addTab(self.artwork_browser, "Original Artwork")
+
+        self.processed_browser = ArtworkBrowser(
+            service=self.artwork_index,
+            artwork_root_getter=lambda: self.processed_artwork_edit.text(),
+            library_kind="processed",
+            parent=self,
+        )
         self.processed_browser.status_message.connect(self.statusBar().showMessage)
         self.tabs.addTab(self.processed_browser, "Processed Artwork")
-        self.pipeline_dashboard = PipelineDashboard(self.artwork_index, self._get_ai_backend, self._set_ai_backend)
+
+        self.pipeline_dashboard = PipelineDashboard(
+            self.artwork_index,
+            self._get_ai_backend,
+            self._set_ai_backend,
+        )
         self.pipeline_dashboard.status_message.connect(self.statusBar().showMessage)
         self.tabs.addTab(self.pipeline_dashboard, "Pipeline / AI")
 
