@@ -4,7 +4,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 4
 
 class DatabaseService:
     def __init__(self, database_path: Path):
@@ -53,7 +53,35 @@ class DatabaseService:
             CREATE INDEX IF NOT EXISTS idx_processed_stem ON artwork_processed(stem COLLATE NOCASE);
             CREATE INDEX IF NOT EXISTS idx_original_sha ON artwork_original(sha256);
             CREATE INDEX IF NOT EXISTS idx_processed_sha ON artwork_processed(sha256);
+
+            CREATE TABLE IF NOT EXISTS print_projects(
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              name TEXT NOT NULL UNIQUE COLLATE NOCASE,
+              default_back_artwork_id INTEGER,
+              created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+              FOREIGN KEY(default_back_artwork_id) REFERENCES artwork_processed(id) ON DELETE SET NULL);
+            CREATE TABLE IF NOT EXISTS print_project_items(
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              project_id INTEGER NOT NULL,
+              processed_artwork_id INTEGER NOT NULL,
+              back_artwork_id INTEGER,
+              quantity INTEGER NOT NULL DEFAULT 1 CHECK(quantity > 0),
+              sort_order INTEGER NOT NULL DEFAULT 0,
+              FOREIGN KEY(project_id) REFERENCES print_projects(id) ON DELETE CASCADE,
+              FOREIGN KEY(processed_artwork_id) REFERENCES artwork_processed(id) ON DELETE CASCADE,
+              FOREIGN KEY(back_artwork_id) REFERENCES artwork_processed(id) ON DELETE SET NULL,
+              UNIQUE(project_id, processed_artwork_id));
+            CREATE INDEX IF NOT EXISTS idx_print_project_items_order
+              ON print_project_items(project_id, sort_order, id);
             """)
+            project_columns = {row["name"] for row in c.execute("PRAGMA table_info(print_projects)")}
+            if "default_back_artwork_id" not in project_columns:
+                c.execute("ALTER TABLE print_projects ADD COLUMN default_back_artwork_id INTEGER")
+
+            item_columns = {row["name"] for row in c.execute("PRAGMA table_info(print_project_items)")}
+            if "back_artwork_id" not in item_columns:
+                c.execute("ALTER TABLE print_project_items ADD COLUMN back_artwork_id INTEGER")
+
             c.execute("INSERT INTO app_metadata(key,value) VALUES('schema_version',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (str(SCHEMA_VERSION),))
 
     def scalar(self, sql: str, parameters: tuple = ()) -> object | None:

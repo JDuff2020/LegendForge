@@ -33,10 +33,12 @@ from app.services.settings_service import SettingsService
 from app.services.database_service import DatabaseService
 from app.services.artwork_index_service import ArtworkIndexService
 from app.services.validation_service import ValidationService
+from app.services.print_project_service import PrintProjectService
 from app.ui.about_dialog import AboutDialog
 from app.ui.artwork_browser import ArtworkBrowser
 from app.ui.settings_dialog import SettingsDialog
 from app.ui.pipeline_dashboard import PipelineDashboard
+from app.ui.print_project_builder import PrintProjectBuilder
 
 log = logging.getLogger(__name__)
 
@@ -72,6 +74,7 @@ class MainWindow(QMainWindow):
 
         self.database = DatabaseService(root / "data" / "legendforge.sqlite3")
         self.artwork_index = ArtworkIndexService(self.database)
+        self.print_projects = PrintProjectService(self.database)
 
         default_pricing = root / "resources" / "DeckPrices.xlsx"
         self.project = Project(pricing_workbook=str(default_pricing))
@@ -260,9 +263,22 @@ class MainWindow(QMainWindow):
             self.artwork_index,
             self._get_ai_backend,
             self._set_ai_backend,
+            lambda: self.artwork_edit.text(),
+            lambda: self.processed_artwork_edit.text(),
+            parent=self,
         )
         self.pipeline_dashboard.status_message.connect(self.statusBar().showMessage)
         self.tabs.addTab(self.pipeline_dashboard, "Pipeline / AI")
+
+        self.print_builder = PrintProjectBuilder(
+            self.print_projects,
+            lambda: self.processed_artwork_edit.text(),
+            lambda: self.output_edit.text(),
+            lambda: self.pricing_edit.text(),
+            parent=self,
+        )
+        self.print_builder.status_message.connect(self.statusBar().showMessage)
+        self.tabs.addTab(self.print_builder, "Print Projects")
 
         self.setCentralWidget(self.tabs)
 
