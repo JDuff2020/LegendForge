@@ -260,11 +260,26 @@ class MainWindow(QMainWindow):
             self.artwork_index,
             self._get_ai_backend,
             self._set_ai_backend,
+            lambda: self.artwork_edit.text(),
+            lambda: self.processed_artwork_edit.text(),
         )
         self.pipeline_dashboard.status_message.connect(self.statusBar().showMessage)
+        self.pipeline_dashboard.filter_requested.connect(self._show_pipeline_filter)
+        self.pipeline_dashboard.processing_finished.connect(self._processing_finished)
         self.tabs.addTab(self.pipeline_dashboard, "Pipeline / AI")
 
         self.setCentralWidget(self.tabs)
+
+    def _show_pipeline_filter(self, status: str) -> None:
+        browser = self.processed_browser if status == "ORPHANED_PROCESSED" else self.artwork_browser
+        browser.set_pipeline_filter(status)
+        self.tabs.setCurrentWidget(browser)
+
+
+    def _processing_finished(self) -> None:
+        self.processed_browser._reload_extensions()
+        self.processed_browser.refresh_results()
+        self.artwork_browser.refresh_results()
 
     def _build_docks(self) -> None:
         self.recent_dock = QDockWidget("Recent Projects", self)
