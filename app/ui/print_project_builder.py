@@ -1,10 +1,41 @@
 from pathlib import Path
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QObject, QThread, Qt, Signal
 from PySide6.QtGui import QPixmap
 from app.services.pricing_service import PricingService
 from app.services.print_sheet_export_service import PrintLayoutPreset, PrintSheetExportService
+from app.services.mpc_export_service import MPCExportOptions, MPCExportService
 from PySide6.QtWidgets import *
+
+
+
+class MPCExportWorker(QObject):
+    progress = Signal(int, int)
+    finished = Signal(object)
+    failed = Signal(str)
+
+    def __init__(self, service, items, processed_root, output_folder, options, project_name):
+        super().__init__()
+        self.service = service
+        self.items = items
+        self.processed_root = processed_root
+        self.output_folder = output_folder
+        self.options = options
+        self.project_name = project_name
+
+    def run(self):
+        try:
+            result = self.service.export(
+                self.items,
+                self.processed_root,
+                self.output_folder,
+                self.options,
+                self.project_name,
+                progress_callback=lambda current, total: self.progress.emit(current, total),
+            )
+            self.finished.emit(result)
+        except Exception as exc:
+            self.failed.emit(str(exc))
 
 
 class PrintProjectBuilder(QWidget):
@@ -18,6 +49,9 @@ class PrintProjectBuilder(QWidget):
         self.pricing_workbook_getter = pricing_workbook_getter
         self.pricing_service = PricingService()
         self.export_service = PrintSheetExportService()
+        self.mpc_export_service = MPCExportService()
+        self.mpc_export_thread = None
+        self.mpc_export_worker = None
         self.project_id = None
         self.available = []
         self.project_items = []
@@ -131,6 +165,48 @@ class PrintProjectBuilder(QWidget):
         export_row.addWidget(export_pdf)
         tools_layout.addLayout(export_row)
         layout.addWidget(tools)
+
+        mpc_box = QGroupBox("MPC Upload Package")
+        mpc_outer = QVBoxLayout(mpc_box)
+        mpc_layout = QHBoxLayout()
+        mpc_layout.addWidget(QLabel("Deck capacity"))
+        self.mpc_capacity_mode = QComboBox()
+        self.mpc_capacity_mode.addItems(["Automatic (lowest price)", "Manual"])
+        self.mpc_capacity_mode.currentIndexChanged.connect(
+            lambda index: self.mpc_capacity.setEnabled(index == 1)
+        )
+        self.mpc_capacity = QSpinBox()
+        self.mpc_capacity.setRange(1, 9999)
+        self.mpc_capacity.setValue(612)
+        self.mpc_capacity.setEnabled(False)
+        self.mpc_split_custom = QCheckBox("Split standard and custom backs")
+        self.mpc_split_custom.setChecked(True)
+        self.mpc_hardlinks = QCheckBox("Use hard links when possible")
+        self.mpc_hardlinks.setToolTip(
+            "Saves disk space when the output is on the same drive. "
+            "Falls back to normal copies when hard links are unavailable."
+        )
+        preview_mpc = QPushButton("Preview MPC Split")
+        preview_mpc.clicked.connect(self.preview_mpc_export)
+        self.export_mpc_button = QPushButton("Export MPC Upload Package")
+        self.export_mpc_button.clicked.connect(self.export_mpc_package)
+        mpc_layout.addWidget(self.mpc_capacity_mode)
+        mpc_layout.addWidget(self.mpc_capacity)
+        mpc_layout.addWidget(self.mpc_split_custom)
+        mpc_layout.addWidget(self.mpc_hardlinks)
+        mpc_layout.addStretch(1)
+        mpc_layout.addWidget(preview_mpc)
+        mpc_layout.addWidget(self.export_mpc_button)
+        mpc_outer.addLayout(mpc_layout)
+
+        self.mpc_progress = QProgressBar()
+        self.mpc_progress.setVisible(False)
+        self.mpc_progress_status = QLabel()
+        self.mpc_progress_status.setVisible(False)
+        self.mpc_progress_status.setWordWrap(True)
+        mpc_outer.addWidget(self.mpc_progress)
+        mpc_outer.addWidget(self.mpc_progress_status)
+        layout.addWidget(mpc_box)
 
     def selected_available_id(self):
         rows=self.available_table.selectionModel().selectedRows()
@@ -428,6 +504,186 @@ class PrintProjectBuilder(QWidget):
             f"{result['pdf_pages']:,} PDF page(s).\n"
             f"Unused slots: {result['unfilled_slots']:,}\n\n{path}",
         )
+
+    def _mpc_deck_capacity(self):
+        if self.mpc_capacity_mode.currentIndex() == 1:
+            return self.mpc_capacity.value()
+
+        total_cards = sum(int(item["quantity"]) for item in self.project_items)
+        pricing_path = Path(self.pricing_workbook_getter() or "")
+        if not pricing_path.is_file():
+            raise ValueError(
+                "Automatic deck capacity requires the MPC pricing workbook. "
+                "Select it in the Project tab or choose Manual capacity."
+            )
+        summary = self.pricing_service.load(pricing_path)
+        best = self.pricing_service.best_quote(summary, total_cards)
+        return int(best["deck_capacity"])
+
+    def _mpc_options(self):
+        return MPCExportOptions(
+            deck_capacity=self._mpc_deck_capacity(),
+            split_custom_backs=self.mpc_split_custom.isChecked(),
+            use_hardlinks=self.mpc_hardlinks.isChecked(),
+        )
+
+    def preview_mpc_export(self):
+        if not self._validate_export():
+            return
+        try:
+            options = self._mpc_options()
+            plan = self.mpc_export_service.plan(
+                self.project_items,
+                Path(self.processed_root_getter()),
+                options,
+            )
+        except Exception as exc:
+            QMessageBox.warning(self, "Could not preview MPC export", str(exc))
+            return
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("MPC Upload Package Preview")
+        dialog.resize(680, 460)
+        layout = QVBoxLayout(dialog)
+        summary = QLabel(
+            f"{plan['total_cards']:,} cards • {plan['total_decks']:,} deck(s) • "
+            f"capacity {plan['deck_capacity']:,} • {plan['unused_slots']:,} unused slot(s)"
+        )
+        summary.setWordWrap(True)
+        layout.addWidget(summary)
+
+        table = QTableWidget(len(plan["groups"]), 5)
+        table.setHorizontalHeaderLabels(
+            ["Export Group", "Cards", "Decks", "Deck Sizes", "Unused Slots"]
+        )
+        table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        for row, group in enumerate(plan["groups"]):
+            values = [
+                group["name"].replace("_", " "),
+                group["card_count"],
+                group["deck_count"],
+                ", ".join(str(value) for value in group["deck_sizes"]),
+                group["unused_slots"],
+            ]
+            for column, value in enumerate(values):
+                table.setItem(row, column, QTableWidgetItem(str(value)))
+        table.horizontalHeader().setStretchLastSection(True)
+        layout.addWidget(table, 1)
+
+        note = QLabel(
+            "Standard-back decks contain ordered fronts plus one common back file. "
+            "Custom-back decks contain ordered Fronts and Backs folders with matching numeric prefixes."
+        )
+        note.setWordWrap(True)
+        layout.addWidget(note)
+        close = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        close.rejected.connect(dialog.reject)
+        layout.addWidget(close)
+        dialog.exec()
+
+    def export_mpc_package(self):
+        if self.mpc_export_thread and self.mpc_export_thread.isRunning():
+            return
+        if not self._validate_export():
+            return
+        try:
+            options = self._mpc_options()
+        except Exception as exc:
+            QMessageBox.warning(self, "MPC export settings", str(exc))
+            return
+
+        default = Path(self.output_root_getter() or ".") / (
+            self._project_name() + "_MPC_Export"
+        )
+        folder = QFileDialog.getExistingDirectory(
+            self,
+            "Choose MPC export folder",
+            str(default),
+        )
+        if not folder:
+            return
+
+        output_folder = Path(folder) / self._project_name()
+        if output_folder.exists() and any(output_folder.iterdir()):
+            answer = QMessageBox.question(
+                self,
+                "Export folder is not empty",
+                f"The folder already contains files:\n\n{output_folder}\n\n"
+                "Continue and overwrite files with matching names?",
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+
+        self.export_mpc_button.setEnabled(False)
+        self.mpc_progress.setVisible(True)
+        self.mpc_progress_status.setVisible(True)
+        self.mpc_progress.setRange(0, 0)
+        self.mpc_progress_status.setText("Preparing MPC upload package…")
+        self.status_message.emit("Exporting MPC upload package…")
+
+        self.mpc_export_thread = QThread(self)
+        self.mpc_export_worker = MPCExportWorker(
+            self.mpc_export_service,
+            list(self.project_items),
+            Path(self.processed_root_getter()),
+            output_folder,
+            options,
+            self._project_name(),
+        )
+        self.mpc_export_worker.moveToThread(self.mpc_export_thread)
+        self.mpc_export_thread.started.connect(self.mpc_export_worker.run)
+        self.mpc_export_worker.progress.connect(self._mpc_export_progress)
+        self.mpc_export_worker.finished.connect(self._mpc_export_finished)
+        self.mpc_export_worker.failed.connect(self._mpc_export_failed)
+        self.mpc_export_worker.finished.connect(self.mpc_export_thread.quit)
+        self.mpc_export_worker.failed.connect(self.mpc_export_thread.quit)
+        self.mpc_export_thread.finished.connect(self.mpc_export_worker.deleteLater)
+        self.mpc_export_thread.finished.connect(self._mpc_export_thread_finished)
+        self.mpc_export_thread.finished.connect(self.mpc_export_thread.deleteLater)
+        self.mpc_export_thread.start()
+
+    def _mpc_export_progress(self, current, total):
+        self.mpc_progress.setRange(0, max(total, 1))
+        self.mpc_progress.setValue(current)
+        self.mpc_progress.setFormat(f"Deck {current:,} of {total:,} — %p%")
+        self.mpc_progress_status.setText(
+            f"Finished deck {current:,} of {total:,}."
+        )
+
+    def _mpc_export_finished(self, result):
+        self.export_mpc_button.setEnabled(True)
+        self.mpc_progress.setRange(0, max(result["total_decks"], 1))
+        self.mpc_progress.setValue(result["total_decks"])
+        self.mpc_progress.setFormat("MPC export complete — 100%")
+        self.mpc_progress_status.setText(
+            f"Finished exporting {result['total_cards']:,} cards into "
+            f"{result['total_decks']:,} deck folder(s)."
+        )
+        self.status_message.emit("MPC upload package export complete")
+        QMessageBox.information(
+            self,
+            "MPC upload package exported",
+            f"{result['total_cards']:,} cards exported into "
+            f"{result['total_decks']:,} deck folder(s).\n"
+            f"Standard-back cards: {result['standard_cards']:,}\n"
+            f"Cards in individually backed decks: {result['custom_cards']:,}\n"
+            f"Unused slots: {result['unused_slots']:,}\n\n"
+            f"{result['output_folder']}",
+        )
+
+    def _mpc_export_failed(self, message):
+        self.export_mpc_button.setEnabled(True)
+        self.mpc_progress.setRange(0, 1)
+        self.mpc_progress.setValue(0)
+        self.mpc_progress.setFormat("Export failed")
+        self.mpc_progress_status.setText(message)
+        self.status_message.emit("MPC upload package export failed")
+        QMessageBox.critical(self, "MPC export failed", message)
+
+    def _mpc_export_thread_finished(self):
+        self.mpc_export_worker = None
+        self.mpc_export_thread = None
+
 
     def export(self):
         if not self.project_id:return
