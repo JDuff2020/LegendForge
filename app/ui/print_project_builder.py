@@ -5,6 +5,7 @@ from PySide6.QtGui import QPixmap
 from app.services.pricing_service import PricingService
 from app.services.print_sheet_export_service import PrintLayoutPreset, PrintSheetExportService
 from app.services.mpc_export_service import MPCExportOptions, MPCExportService
+from app.services.mpc_preflight_service import MPCPreflightService
 from PySide6.QtWidgets import *
 
 
@@ -50,6 +51,7 @@ class PrintProjectBuilder(QWidget):
         self.pricing_service = PricingService()
         self.export_service = PrintSheetExportService()
         self.mpc_export_service = MPCExportService()
+        self.mpc_preflight_service = MPCPreflightService(self.mpc_export_service)
         self.mpc_export_thread = None
         self.mpc_export_worker = None
         self.project_id = None
@@ -186,6 +188,8 @@ class PrintProjectBuilder(QWidget):
             "Saves disk space when the output is on the same drive. "
             "Falls back to normal copies when hard links are unavailable."
         )
+        preflight_mpc = QPushButton("Run MPC Preflight")
+        preflight_mpc.clicked.connect(self.run_mpc_preflight)
         preview_mpc = QPushButton("Preview MPC Split")
         preview_mpc.clicked.connect(self.preview_mpc_export)
         self.export_mpc_button = QPushButton("Export MPC Upload Package")
@@ -195,6 +199,7 @@ class PrintProjectBuilder(QWidget):
         mpc_layout.addWidget(self.mpc_split_custom)
         mpc_layout.addWidget(self.mpc_hardlinks)
         mpc_layout.addStretch(1)
+        mpc_layout.addWidget(preflight_mpc)
         mpc_layout.addWidget(preview_mpc)
         mpc_layout.addWidget(self.export_mpc_button)
         mpc_outer.addLayout(mpc_layout)
@@ -527,6 +532,94 @@ class PrintProjectBuilder(QWidget):
             use_hardlinks=self.mpc_hardlinks.isChecked(),
         )
 
+    def _run_mpc_preflight(self):
+        options = self._mpc_options()
+        return self.mpc_preflight_service.check(
+            self.project_items,
+            Path(self.processed_root_getter()),
+            options,
+            minimum_width=self.export_width.value(),
+            minimum_height=self.export_height.value(),
+        )
+
+    def run_mpc_preflight(self):
+        if not self.project_id:
+            QMessageBox.information(
+                self,
+                "Print project required",
+                "Create or select a print project first.",
+            )
+            return
+        try:
+            result = self._run_mpc_preflight()
+        except Exception as exc:
+            QMessageBox.warning(self, "MPC preflight failed", str(exc))
+            return
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("MPC Preflight")
+        dialog.resize(940, 620)
+        layout = QVBoxLayout(dialog)
+
+        state = "READY TO EXPORT" if result["passed"] else "NOT READY"
+        summary = QLabel(
+            f"<b>{state}</b> • {result['total_cards']:,} cards • "
+            f"{result['unique_files_checked']:,} unique files checked • "
+            f"{result['errors']:,} error(s) • "
+            f"{result['warnings']:,} warning(s)"
+        )
+        summary.setWordWrap(True)
+        layout.addWidget(summary)
+
+        if result["plan"]:
+            plan = result["plan"]
+            deck_summary = QLabel(
+                f"{plan['total_decks']:,} deck(s) planned at capacity "
+                f"{plan['deck_capacity']:,}; "
+                f"{plan['unused_slots']:,} unused slot(s). "
+                f"Standard-back remainder moved to individually backed decks: "
+                f"{plan['transferred_standard_cards']:,}."
+            )
+            deck_summary.setWordWrap(True)
+            layout.addWidget(deck_summary)
+
+        issues = result["issues"]
+        table = QTableWidget(len(issues), 4)
+        table.setHorizontalHeaderLabels(
+            ["Severity", "Category", "Artwork", "Details"]
+        )
+        table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        table.setAlternatingRowColors(True)
+        table.verticalHeader().setVisible(False)
+        table.setColumnWidth(0, 85)
+        table.setColumnWidth(1, 130)
+        table.setColumnWidth(2, 220)
+        for row, issue in enumerate(issues):
+            values = [
+                issue.severity,
+                issue.category,
+                issue.filename,
+                issue.message,
+            ]
+            for column, value in enumerate(values):
+                table.setItem(row, column, QTableWidgetItem(str(value)))
+        table.horizontalHeader().setStretchLastSection(True)
+        layout.addWidget(table, 1)
+
+        if not issues:
+            table.setRowCount(1)
+            table.setItem(0, 0, QTableWidgetItem("Pass"))
+            table.setItem(0, 3, QTableWidgetItem(
+                "No preflight problems were found."
+            ))
+
+        close = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        close.rejected.connect(dialog.reject)
+        layout.addWidget(close)
+        dialog.exec()
+        return result
+
     def preview_mpc_export(self):
         if not self._validate_export():
             return
@@ -588,9 +681,35 @@ class PrintProjectBuilder(QWidget):
             return
         try:
             options = self._mpc_options()
+            preflight = self.mpc_preflight_service.check(
+                self.project_items,
+                Path(self.processed_root_getter()),
+                options,
+                minimum_width=self.export_width.value(),
+                minimum_height=self.export_height.value(),
+            )
         except Exception as exc:
             QMessageBox.warning(self, "MPC export settings", str(exc))
             return
+
+        if not preflight["passed"]:
+            QMessageBox.warning(
+                self,
+                "MPC preflight errors",
+                f"Export is blocked by {preflight['errors']:,} preflight "
+                "error(s). Run MPC Preflight to review the problems.",
+            )
+            return
+
+        if preflight["warnings"]:
+            answer = QMessageBox.question(
+                self,
+                "MPC preflight warnings",
+                f"Preflight found {preflight['warnings']:,} warning(s), but "
+                "no blocking errors. Continue with the export?",
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return
 
         default = Path(self.output_root_getter() or ".") / (
             self._project_name() + "_MPC_Export"

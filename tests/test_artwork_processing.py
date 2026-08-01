@@ -141,3 +141,70 @@ def test_processing_presets_round_trip(tmp_path):
     assert loaded == preset
     processor.delete_preset("MPC")
     assert processor.load_preset("MPC") is None
+
+
+
+def test_mpc_bleed_mode_creates_minimum_canvas_and_32px_bleed(tmp_path):
+    originals = tmp_path / "originals"
+    processed = tmp_path / "processed"
+    # This size is the MPC trim area at the minimum output resolution.
+    make_image(originals / "Card.png", (752, 1046))
+
+    database = DatabaseService(tmp_path / "db.sqlite3")
+    index = ArtworkIndexService(database)
+    index.index_folder(originals)
+    record = index.search().records[0]
+    processor = ArtworkProcessingService(database)
+    preset = ProcessingPreset(
+        width=816,
+        height=1110,
+        output_format="PNG",
+        fit_mode="MPC bleed (edge extend)",
+        bleed_px_at_minimum=32,
+    )
+
+    assert processor.scaled_bleed(preset) == (32, 32)
+    assert processor.trim_dimensions(preset) == (752, 1046)
+
+    summary = processor.process_records(
+        [record],
+        originals,
+        processed,
+        preset,
+    )
+    assert summary.completed == 1
+    with Image.open(processed / "Card.png") as image:
+        assert image.size == (816, 1110)
+        # Solid source artwork should extend continuously into every corner.
+        assert image.getpixel((0, 0)) == image.getpixel((408, 555))
+
+
+def test_mpc_bleed_scales_with_larger_output_resolution(tmp_path):
+    database = DatabaseService(tmp_path / "db.sqlite3")
+    processor = ArtworkProcessingService(database)
+    preset = ProcessingPreset(
+        width=1632,
+        height=2220,
+        fit_mode="MPC bleed (edge extend)",
+        bleed_px_at_minimum=32,
+    )
+
+    assert processor.scaled_bleed(preset) == (64, 64)
+    assert processor.trim_dimensions(preset) == (1504, 2092)
+
+    predicted, scale = processor.predict_output(752, 1046, preset)
+    assert predicted == (1632, 2220)
+    assert scale == 2.0
+
+
+def test_processing_preset_round_trip_preserves_bleed_setting(tmp_path):
+    database = DatabaseService(tmp_path / "db.sqlite3")
+    processor = ArtworkProcessingService(database)
+    preset = ProcessingPreset(
+        width=816,
+        height=1110,
+        fit_mode="MPC bleed (edge extend)",
+        bleed_px_at_minimum=32,
+    )
+    processor.save_preset("MPC Bleed", preset)
+    assert processor.load_preset("MPC Bleed") == preset

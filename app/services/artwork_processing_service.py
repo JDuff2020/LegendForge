@@ -20,7 +20,7 @@ class ArtworkProcessingService:
     """Deterministic local artwork processor backed by Pillow."""
 
     PROCESSOR_NAME = "LegendForge Pillow"
-    PROCESSOR_VERSION = "2"
+    PROCESSOR_VERSION = "3"
 
     def __init__(self, database: DatabaseService):
         self.database = database
@@ -73,6 +73,30 @@ class ArtworkProcessingService:
         return summary
 
 
+    MPC_MINIMUM_WIDTH = 816
+    MPC_MINIMUM_HEIGHT = 1110
+
+    @classmethod
+    def scaled_bleed(cls, preset: ProcessingPreset) -> tuple[int, int]:
+        """
+        Return horizontal and vertical bleed in output pixels.
+
+        A 816 × 1110 output uses 32 px on every side by default. Bleed scales
+        independently with output width and height so larger render sizes retain
+        the same physical bleed allowance.
+        """
+        base = max(0, int(preset.bleed_px_at_minimum))
+        bleed_x = round(base * max(1, preset.width) / cls.MPC_MINIMUM_WIDTH)
+        bleed_y = round(base * max(1, preset.height) / cls.MPC_MINIMUM_HEIGHT)
+        return max(0, bleed_x), max(0, bleed_y)
+
+    @classmethod
+    def trim_dimensions(cls, preset: ProcessingPreset) -> tuple[int, int]:
+        bleed_x, bleed_y = cls.scaled_bleed(preset)
+        trim_width = max(1, int(preset.width) - 2 * bleed_x)
+        trim_height = max(1, int(preset.height) - 2 * bleed_y)
+        return trim_width, trim_height
+
     @staticmethod
     def predict_output(width: int, height: int, preset: ProcessingPreset) -> tuple[tuple[int, int], float]:
         """Return predicted output dimensions and uniform scale factor."""
@@ -82,6 +106,10 @@ class ArtworkProcessingService:
         mode = preset.fit_mode.casefold()
         if mode == "original size":
             return (width, height), 1.0
+        if mode == "mpc bleed (edge extend)":
+            trim_width, trim_height = ArtworkProcessingService.trim_dimensions(preset)
+            scale = max(trim_width / width, trim_height / height)
+            return target, scale
         if mode == "minimum size (proportional)":
             scale = max(target[0] / width, target[1] / height, 1.0)
             return (max(target[0], round(width * scale)), max(target[1], round(height * scale))), scale
@@ -115,6 +143,7 @@ class ArtworkProcessingService:
             "width": preset.width, "height": preset.height,
             "output_format": preset.output_format, "quality": preset.quality,
             "fit_mode": preset.fit_mode, "background": preset.background,
+            "bleed_px_at_minimum": preset.bleed_px_at_minimum,
         }
         self._write_preset_store(presets)
 
@@ -193,6 +222,28 @@ class ArtworkProcessingService:
 
         if mode == "original size":
             return image.copy()
+        if mode == "mpc bleed (edge extend)":
+            bleed_x, bleed_y = ArtworkProcessingService.scaled_bleed(preset)
+            trim_width, trim_height = ArtworkProcessingService.trim_dimensions(preset)
+            if bleed_x * 2 >= target[0] or bleed_y * 2 >= target[1]:
+                raise ValueError(
+                    "Bleed is too large for the selected output dimensions."
+                )
+
+            # The source represents the trimmed card face. Fit it into the trim
+            # rectangle and extend its outer edge pixels into the bleed area.
+            trimmed = ImageOps.fit(
+                image,
+                (trim_width, trim_height),
+                method=Image.Resampling.LANCZOS,
+                centering=(0.5, 0.5),
+            )
+            return ArtworkProcessingService._extend_edges(
+                trimmed,
+                target,
+                bleed_x,
+                bleed_y,
+            )
         if mode == "minimum size (proportional)":
             # Treat width and height as minimum requirements. Scale both
             # dimensions by the same percentage until both minimums are met.
@@ -228,6 +279,69 @@ class ArtworkProcessingService:
             if contained.mode != "RGB":
                 contained = contained.convert("RGB")
             canvas.paste(contained, (x, y))
+        return canvas
+
+    @staticmethod
+    def _extend_edges(
+        trimmed: Image.Image,
+        target: tuple[int, int],
+        bleed_x: int,
+        bleed_y: int,
+    ) -> Image.Image:
+        """Extend narrow edge bands outward to create printable bleed."""
+        if bleed_x == 0 and bleed_y == 0:
+            return trimmed.resize(target, Image.Resampling.LANCZOS)
+
+        width, height = trimmed.size
+        canvas = Image.new(trimmed.mode, target)
+        canvas.paste(trimmed, (bleed_x, bleed_y))
+
+        # Use a small edge band instead of a single pixel to avoid obvious
+        # striping while keeping the extended artwork continuous at the trim.
+        band_x = max(1, min(8, width))
+        band_y = max(1, min(8, height))
+
+        if bleed_x:
+            left = trimmed.crop((0, 0, band_x, height)).resize(
+                (bleed_x, height),
+                Image.Resampling.BICUBIC,
+            )
+            right = trimmed.crop((width - band_x, 0, width, height)).resize(
+                (bleed_x, height),
+                Image.Resampling.BICUBIC,
+            )
+            canvas.paste(left, (0, bleed_y))
+            canvas.paste(right, (bleed_x + width, bleed_y))
+
+        if bleed_y:
+            top = trimmed.crop((0, 0, width, band_y)).resize(
+                (width, bleed_y),
+                Image.Resampling.BICUBIC,
+            )
+            bottom = trimmed.crop((0, height - band_y, width, height)).resize(
+                (width, bleed_y),
+                Image.Resampling.BICUBIC,
+            )
+            canvas.paste(top, (bleed_x, 0))
+            canvas.paste(bottom, (bleed_x, bleed_y + height))
+
+        if bleed_x and bleed_y:
+            corners = (
+                ((0, 0, band_x, band_y), (0, 0)),
+                ((width - band_x, 0, width, band_y), (bleed_x + width, 0)),
+                ((0, height - band_y, band_x, height), (0, bleed_y + height)),
+                (
+                    (width - band_x, height - band_y, width, height),
+                    (bleed_x + width, bleed_y + height),
+                ),
+            )
+            for crop_box, location in corners:
+                corner = trimmed.crop(crop_box).resize(
+                    (bleed_x, bleed_y),
+                    Image.Resampling.BICUBIC,
+                )
+                canvas.paste(corner, location)
+
         return canvas
 
     def _create_job(self, original_id: int, backend: str) -> int:

@@ -167,23 +167,37 @@ class PipelineDashboard(QWidget):
         preset_form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
         self.width_spin = QSpinBox()
         self.width_spin.setRange(1, 20000)
-        self.width_spin.setValue(1600)
+        self.width_spin.setValue(816)
         self.height_spin = QSpinBox()
         self.height_spin.setRange(1, 20000)
-        self.height_spin.setValue(2400)
+        self.height_spin.setValue(1110)
         self.format_combo = QComboBox()
         self.format_combo.addItems(["PNG", "JPEG", "WEBP"])
         self.fit_combo = QComboBox()
         self.fit_combo.addItems([
-            "Minimum size (proportional)", "Contain", "Cover", "Stretch", "Original size"
+            "MPC bleed (edge extend)",
+            "Minimum size (proportional)",
+            "Contain",
+            "Cover",
+            "Stretch",
+            "Original size",
         ])
         self.quality_spin = QSpinBox()
         self.quality_spin.setRange(1, 100)
         self.quality_spin.setValue(95)
         self.background_edit = QLineEdit("#000000")
+        self.bleed_spin = QSpinBox()
+        self.bleed_spin.setRange(0, 200)
+        self.bleed_spin.setValue(32)
+        self.bleed_spin.setToolTip(
+            "Bleed on each side at the 816 × 1110 MPC minimum. "
+            "LegendForge scales it automatically for larger outputs."
+        )
+        self.bleed_details = QLabel()
+        self.bleed_details.setWordWrap(True)
         for widget in (
             self.width_spin, self.height_spin, self.format_combo, self.fit_combo,
-            self.quality_spin, self.background_edit,
+            self.quality_spin, self.background_edit, self.bleed_spin,
         ):
             widget.setMinimumHeight(30)
             widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
@@ -193,6 +207,8 @@ class PipelineDashboard(QWidget):
         preset_form.addRow("Fit mode", self.fit_combo)
         preset_form.addRow("JPEG/WEBP quality", self.quality_spin)
         preset_form.addRow("Padding background", self.background_edit)
+        preset_form.addRow("Bleed at 816 × 1110", self.bleed_spin)
+        preset_form.addRow("Calculated MPC area", self.bleed_details)
         preset_layout.addLayout(preset_form)
         layout.addWidget(preset_box)
 
@@ -307,7 +323,7 @@ class PipelineDashboard(QWidget):
         self.delete_preset_button.clicked.connect(self._delete_preset)
         for widget in (
             self.width_spin, self.height_spin, self.format_combo, self.fit_combo,
-            self.quality_spin, self.background_edit,
+            self.quality_spin, self.background_edit, self.bleed_spin,
         ):
             if hasattr(widget, "valueChanged"):
                 widget.valueChanged.connect(self._refresh_predictions)
@@ -315,6 +331,7 @@ class PipelineDashboard(QWidget):
                 widget.currentTextChanged.connect(self._refresh_predictions)
             elif hasattr(widget, "textChanged"):
                 widget.textChanged.connect(self._refresh_predictions)
+        self._update_bleed_details()
 
     def _preset(self) -> ProcessingPreset:
         return ProcessingPreset(
@@ -324,6 +341,7 @@ class PipelineDashboard(QWidget):
             quality=self.quality_spin.value(),
             fit_mode=self.fit_combo.currentText(),
             background=self.background_edit.text().strip() or "#000000",
+            bleed_px_at_minimum=self.bleed_spin.value(),
         )
 
     def _load_saved_presets(self) -> None:
@@ -363,6 +381,7 @@ class PipelineDashboard(QWidget):
         self.quality_spin.setValue(preset.quality)
         self.fit_combo.setCurrentText(preset.fit_mode)
         self.background_edit.setText(preset.background)
+        self.bleed_spin.setValue(preset.bleed_px_at_minimum)
 
     def _queue_items(self):
         records = []
@@ -406,12 +425,28 @@ class PipelineDashboard(QWidget):
         if not hasattr(self, "queue_table"):
             return
         preset = self._preset()
+        self._update_bleed_details(preset)
         for row, record in enumerate(self._queue_records):
             predicted, scale = self.processor.predict_output(record.width, record.height, preset)
             self.queue_table.item(row, 4).setText(f"{predicted[0]} × {predicted[1]}")
             self.queue_table.item(row, 5).setText(f"{scale * 100:.1f}%")
             self.queue_table.item(row, 6).setText(self.processor.scale_warning(scale))
         self._update_preview()
+
+    def _update_bleed_details(self, preset: ProcessingPreset | None = None) -> None:
+        preset = preset or self._preset()
+        if preset.fit_mode.casefold() != "mpc bleed (edge extend)":
+            self.bleed_details.setText(
+                "Bleed settings apply only to MPC bleed mode."
+            )
+            return
+        bleed_x, bleed_y = self.processor.scaled_bleed(preset)
+        trim_width, trim_height = self.processor.trim_dimensions(preset)
+        self.bleed_details.setText(
+            f"Final: {preset.width} × {preset.height} • "
+            f"bleed: {bleed_x}px left/right and {bleed_y}px top/bottom • "
+            f"trim: {trim_width} × {trim_height}"
+        )
 
     def _selected_ids(self) -> list[int]:
         ids = []
@@ -458,11 +493,20 @@ class PipelineDashboard(QWidget):
         self._set_preview_pixmap(self.original_preview, original, "Original unavailable")
         self._set_preview_pixmap(self.processed_preview, processed, "Not processed yet")
         predicted, scale = self.processor.predict_output(record.width, record.height, self._preset())
+        preset = self._preset()
+        bleed_text = ""
+        if preset.fit_mode.casefold() == "mpc bleed (edge extend)":
+            bleed_x, bleed_y = self.processor.scaled_bleed(preset)
+            trim_width, trim_height = self.processor.trim_dimensions(preset)
+            bleed_text = (
+                f"<br>MPC bleed: {bleed_x}px L/R, {bleed_y}px T/B"
+                f"<br>Trim area: {trim_width} × {trim_height}"
+            )
         self.preview_details.setText(
             f"<b>{record.filename}</b><br>{record.relative_path}<br>"
             f"Original: {record.width} × {record.height}<br>"
-            f"Predicted: {predicted[0]} × {predicted[1]} ({scale * 100:.1f}%)<br>"
-            f"{self.processor.scale_warning(scale)}"
+            f"Predicted: {predicted[0]} × {predicted[1]} ({scale * 100:.1f}%)"
+            f"{bleed_text}<br>{self.processor.scale_warning(scale)}"
         )
         self.open_original_button.setEnabled(original.is_file())
         self.open_processed_button.setEnabled(processed.is_file())

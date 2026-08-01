@@ -6,12 +6,13 @@ from pathlib import Path
 
 @dataclass(frozen=True, slots=True)
 class ProcessingPreset:
-    width: int = 744
-    height: int = 1039
+    width: int = 816
+    height: int = 1110
     output_format: str = "PNG"
     quality: int = 95
-    fit_mode: str = "Minimum size (proportional)"
+    fit_mode: str = "MPC bleed (edge extend)"
     background: str = "#000000"
+    bleed_px_at_minimum: int = 32
 
     @property
     def extension(self) -> str:
